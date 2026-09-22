@@ -1,0 +1,163 @@
+name: Check
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v3
+      - run: go test ./...
+      - run: go vet ./...
+      - name: Check Go formatting
+        run: test -z "$(gofmt -l internal packages)"
+      - run: oxfmt --check .
+      - run: actionlint
+
+  # Only what the pull request touches is validated, and every package says
+  # for itself where it is built and whether rebuilding it here is affordable.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.plan.outputs.packages }}
+      targets: ${{ steps.plan.outputs.targets }}
+      rebuilds: ${{ steps.plan.outputs.rebuilds }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@v3
+      - id: plan
+        name: Ask the changed packages where they build
+        # bash rather than the default shell, so a failure anywhere in these
+        # pipelines fails the step instead of being swallowed.
+        shell: bash
+        env:
+          # Empty for workflow_dispatch, which validates every package.
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [[ -n "$BASE" ]]; then
+            mapfile -t PACKAGES < <(git diff --name-only "$BASE" HEAD -- packages | cut -d/ -f2,3 | sort -u)
+          else
+            mapfile -t PACKAGES < <(ls -d packages/*/*/ | sed 's|^packages/||; s|/$||')
+          fi
+          ROWS=()
+          for PACKAGE in ${PACKAGES[@]+"${PACKAGES[@]}"}; do
+            CONFIG=$(go run "packages/$PACKAGE/main.go" config)
+            REBUILD=$(sed -n 's/^rebuild=//p' <<<"$CONFIG")
+            for RELEASE in $(sed -n 's/^releases=//p' <<<"$CONFIG"); do
+              ROWS+=("$PACKAGE $RELEASE $REBUILD")
+            done
+          done
+          PLAN=$(printf '%s\n' ${ROWS[@]+"${ROWS[@]}"} | jq -Rsc '
+            split("\n") | map(select(. != "")) |
+            map(split(" ") | {package: .[0], fedora: .[1], rebuild: .[2]})')
+          {
+            echo "packages=$(jq -c 'map(.package) | unique' <<<"$PLAN")"
+            echo "targets=$(jq -c 'map({package, fedora})' <<<"$PLAN")"
+            echo "rebuilds=$(jq -c 'map(select(.rebuild == "true") | {package, fedora})' <<<"$PLAN")"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  # A generated spec must be exactly what its definition produces, so a hand
+  # edit to a spec file, or a definition change without a regenerated spec,
+  # fails here.
+  spec:
+    needs: plan
+    if: needs.plan.outputs.packages != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.plan.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v3
+      - name: Regenerate the spec file at its packaged version
+        run: go run "packages/${{ matrix.package }}/main.go" gen
+      - name: Check the committed spec matches its definition
+        run: git diff --exit-code -- "packages/${{ matrix.package }}"
+
+  # One job per package and Fedora release it targets. The build target is the
+  # job environment itself; no nested containers.
+  srpm:
+    needs: plan
+    if: needs.plan.outputs.targets != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.targets) }}
+    container: registry.fedoraproject.org/fedora:${{ matrix.fedora }}
+    steps:
+      - name: Prepare the Fedora job container
+        run: dnf -y --setopt=install_weak_deps=False install git-core tar gzip xz
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - id: srpm
+        uses: ./.github/actions/source-rpm
+        with:
+          package: ${{ matrix.package }}
+      - uses: actions/upload-artifact@v6
+        with:
+          name: srpm-${{ steps.srpm.outputs.name }}-fedora-${{ matrix.fedora }}
+          path: dist/*.src.rpm
+          if-no-files-found: error
+
+  # Only packages that ask for it, because a full rebuild is affordable for
+  # repackaged binaries and prohibitive for a large source build.
+  rebuild:
+    needs: plan
+    if: needs.plan.outputs.rebuilds != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.rebuilds) }}
+    container: registry.fedoraproject.org/fedora:${{ matrix.fedora }}
+    steps:
+      - name: Prepare the Fedora job container
+        run: dnf -y --setopt=install_weak_deps=False install git-core tar gzip xz
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v3
+      - id: srpm
+        uses: ./.github/actions/source-rpm
+        with:
+          package: ${{ matrix.package }}
+      - id: config
+        shell: bash
+        run: go run "packages/${{ matrix.package }}/main.go" config >> "$GITHUB_OUTPUT"
+      - name: Rebuild the binary RPM and run what it installs
+        env:
+          SRPM: ${{ steps.srpm.outputs.srpm }}
+          VERIFY: ${{ steps.config.outputs.verify }}
+        run: |
+          dnf -y --setopt=install_weak_deps=False install dnf-plugins-core desktop-file-utils
+          dnf -y --setopt=install_weak_deps=False builddep "$SRPM"
+          rpmbuild --rebuild --define "_topdir $PWD/dist" "$SRPM"
+          dnf -y --setopt=install_weak_deps=False install dist/RPMS/*/*.rpm
+          # The package says how to prove its installation works.
+          $VERIFY
+      - uses: actions/upload-artifact@v6
+        with:
+          name: rpm-${{ steps.srpm.outputs.name }}-fedora-${{ matrix.fedora }}
+          path: dist/RPMS/**/*.rpm
+          if-no-files-found: error

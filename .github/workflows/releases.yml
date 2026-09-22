@@ -1,0 +1,135 @@
+name: Upstream releases
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-releases
+  cancel-in-progress: false
+
+jobs:
+  packages:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.list.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - id: list
+        name: List the package definitions
+        # bash rather than the default shell, so a failure anywhere in these
+        # pipelines fails the step instead of being swallowed.
+        shell: bash
+        run: |
+          ls -d packages/*/*/ | sed 's|^packages/||; s|/$||' |
+            jq -Rsc 'split("\n") | map(select(. != ""))' |
+            sed 's|^|packages=|' >> "$GITHUB_OUTPUT"
+
+  # One job per package: its upstream is asked on its own terms, and an API
+  # failure or an unreadable tag holds back only that package.
+  update:
+    needs: packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.packages.outputs.packages) }}
+    steps:
+      - name: Require the workflow-triggering bot token
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          if [[ -z "$GH_PAT" ]]; then
+            echo 'Set GH_PAT with repository contents and pull-request write permissions.' >&2
+            exit 1
+          fi
+      - name: Require the release bot identity
+        env:
+          BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
+        run: |
+          if [[ -z "$BOT_EMAIL" ]]; then
+            echo 'Set the RELEASE_BOT_EMAIL variable to the address the update branches are committed under.' >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          token: ${{ secrets.GH_PAT }}
+      - uses: jdx/mise-action@v3
+
+      # The package definition decides what a release is, so a GitHub release,
+      # the highest version tag and anything else are all just `check`.
+      - id: check
+        name: Ask upstream for its latest release
+        shell: bash
+        run: go run "packages/${{ matrix.package }}/main.go" check | tee -a "$GITHUB_OUTPUT"
+
+      - if: steps.check.outputs.update == 'true'
+        name: Generate the spec file and source checksums
+        # The generator writes a changelog entry for the new version, and
+        # authors it with the same identity the commit below is made under.
+        env:
+          RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
+          RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
+        run: go run "packages/${{ matrix.package }}/main.go" gen "${{ steps.check.outputs.version }}"
+
+      - if: steps.check.outputs.update == 'true'
+        name: Open or update the pull request
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          PACKAGE: ${{ matrix.package }}
+          # The identity the update branches are committed under, and the
+          # email that decides which branches this job may rewrite.
+          BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
+          BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
+          VERSION: ${{ steps.check.outputs.version }}
+          CURRENT: ${{ steps.check.outputs.current }}
+          UPSTREAM: ${{ steps.check.outputs.upstream }}
+        run: |
+          NAME="${PACKAGE##*/}"
+          TITLE="chore($NAME): update to $VERSION"
+          BOT_NAME="${BOT_NAME:-copr-bot}"
+          git config user.name "$BOT_NAME"
+          git config user.email "$BOT_EMAIL"
+          # The branch is the package's path under packages/, so it names the
+          # project and the package it belongs to.
+          git switch -c "$PACKAGE"
+          git add -- "packages/$PACKAGE"
+          if git diff --cached --quiet; then
+            echo "The definition generates no change for $VERSION."
+            exit 0
+          fi
+          git commit -m "$TITLE"
+          if git fetch --quiet origin "$PACKAGE" 2>/dev/null; then
+            # An open pull request that already carries this update is left
+            # exactly as it is, rather than rewritten every six hours.
+            if git diff --quiet HEAD FETCH_HEAD -- "packages/$PACKAGE"; then
+              echo "The open pull request already has $VERSION."
+              exit 0
+            fi
+            # Replacing a pending release with a newer one is the point of
+            # this branch, but only this bot may own it.
+            AUTHOR=$(git log -1 --format=%ae FETCH_HEAD)
+            if [[ "$AUTHOR" != "$BOT_EMAIL" ]]; then
+              echo "The $PACKAGE branch was last written by $AUTHOR; refusing to overwrite it." >&2
+              exit 1
+            fi
+          fi
+          git push --force origin "HEAD:refs/heads/$PACKAGE"
+          BODY=$(printf '%s\n' \
+            "Update \`$NAME\` from \`$CURRENT\` to \`$VERSION\`." \
+            "" \
+            "Upstream: $UPSTREAM" \
+            "" \
+            "The spec file and its source checksums are generated by \`go run packages/$PACKAGE/main.go gen $VERSION\`. This bot owns the \`$PACKAGE\` branch; put packaging edits on \`main\`.")
+          if [[ -n "$(gh pr list --head "$PACKAGE" --base main --state open --json number --jq '.[].number')" ]]; then
+            gh pr edit "$PACKAGE" --title "$TITLE" --body "$BODY"
+          else
+            gh pr create --base main --head "$PACKAGE" --title "$TITLE" --body "$BODY"
+          fi

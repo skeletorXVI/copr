@@ -1,0 +1,9 @@
+# zed
+
+The spec follows [Zed's distribution-maintainer instructions](https://zed.dev/docs/development/linux#notes-for-packaging-zed): build both `cli` and `zed`, install them as `/usr/bin/zed` and `/usr/libexec/zed-editor`, render the upstream desktop template as `dev.zed.Zed.desktop`, and make that file executable. `RELEASE_CHANNEL` contains `stable` without a trailing newline. The compiled `ZED_UPDATE_EXPLANATION` directs users to `sudo dnf upgrade zed` and disables application self-updates. Upstream's license-generation script runs before compilation.
+
+This is the **standard upstream source build**. Cargo compiles the editor and CLI from the tagged source; upstream's Rust/WebRTC build downloads its precompiled native WebRTC dependency. Cargo dependencies follow `Cargo.lock`, but this is not a fully vendored, offline, bit-reproducible build. Do not describe it as compiling every third-party component from source. Build-time network access is enabled only for this package, which its definition states as `Network: true`. Zed's language servers and extensions retain their upstream runtime download behavior.
+
+The generator reads the minimum Rust version out of `rust-toolchain.toml` in the pinned source archive and renders it into `BuildRequires`; it reads the archive rather than the upstream branch, so regenerating an older version stays reproducible. Fedora supplies Rust/Cargo. If a target Fedora release cannot satisfy the requirement, the build fails until its repositories provide a suitable compiler or a separately reviewed packaging change addresses it. RPM flags retain upstream's `tokio_unstable` cfg. The redundant system-library RPATH added by upstream is removed during installation.
+
+A full rebuild is prohibitive here, so this package sets no `Verify`: a pull request builds its source RPM only, and COPR performs the binary build.

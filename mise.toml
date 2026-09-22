@@ -1,0 +1,33 @@
+[tools]
+go = "1.26.5"
+oxfmt = "0.64.0"
+actionlint = "1.7.12"
+gh = "2.101.0"
+
+[tasks.test]
+run = "go test ./..."
+
+[tasks.fmt]
+run = ["gofmt -w internal packages", "oxfmt ."]
+
+[tasks.check]
+run = [
+  "go test ./...",
+  "go vet ./...",
+  "test -z \"$(gofmt -l internal packages)\"",
+  "mise run generate",
+  # The same check the Check workflow runs per package: a committed spec must
+  # be exactly what its definition generates.
+  "git diff --exit-code -- packages",
+  "oxfmt --check .",
+  "actionlint",
+]
+
+# Regenerate every spec file at its packaged version. To move a package to a
+# new release, name the version: go run packages/zed/zed/main.go gen 1.2.3
+[tasks.generate]
+run = 'for d in packages/*/*/; do go run "$d/main.go" gen; done'
+
+# Ask every upstream what it currently offers. Writes nothing.
+[tasks.releases]
+run = 'for d in packages/*/*/; do echo "== $d"; go run "$d/main.go" check; done'

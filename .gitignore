@@ -1,0 +1,7 @@
+/dist/
+/.cache/
+*.rpm
+
+# Sources fetched into the package directory by the source RPM build
+packages/*/*/*.tar.*
+packages/*/*/.rpmbuild/

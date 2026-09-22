@@ -1,0 +1,52 @@
+name: Source RPM
+description: Download and verify a package's sources, then build its source RPM.
+
+inputs:
+  package:
+    description: Package directory under packages/, as <project>/<name>.
+    required: true
+  outdir:
+    description: Directory to write the source RPM into.
+    default: dist
+
+outputs:
+  name:
+    description: The package name.
+    value: ${{ steps.build.outputs.name }}
+  srpm:
+    description: Path of the source RPM that was built.
+    value: ${{ steps.build.outputs.srpm }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install the RPM build tools
+      shell: bash
+      run: dnf -y --setopt=install_weak_deps=False install rpm-build rpmdevtools /usr/bin/curl
+
+    - id: build
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+        OUTDIR: ${{ inputs.outdir }}
+      run: |
+        DIR="packages/$PACKAGE"
+        NAME="${PACKAGE##*/}"
+        SPEC="$DIR/$NAME.spec"
+        mkdir -p "$OUTDIR"
+        # Fetch the remote sources the spec lists, then hold the whole set
+        # against the digests committed beside it: a re-tagged or tampered
+        # upstream archive fails here rather than reaching COPR.
+        rpmdev-spectool --get-files --directory "$DIR" "$SPEC"
+        if [[ -f "$DIR/sources" ]]; then
+          (cd "$DIR" && sha256sum --check --strict sources)
+        fi
+        rpmbuild -bs "$SPEC" --nodeps \
+          --define "_sourcedir $PWD/$DIR" \
+          --define "_srcrpmdir $PWD/$OUTDIR" \
+          --define "_topdir $PWD/$DIR/.rpmbuild"
+        rm -rf "$DIR/.rpmbuild"
+        SRPMS=("$OUTDIR"/*.src.rpm)
+        test ${#SRPMS[@]} -eq 1
+        echo "name=$NAME" >> "$GITHUB_OUTPUT"
+        echo "srpm=${SRPMS[0]}" >> "$GITHUB_OUTPUT"

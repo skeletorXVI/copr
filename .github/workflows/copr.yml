@@ -1,0 +1,86 @@
+name: COPR
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # What a merge changed is what gets rebuilt. A packaging change that lands
+  # without touching a package directory builds nothing.
+  changed:
+    if: vars.COPR_OWNER != ''
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.list.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: list
+        name: List the packages to rebuild
+        shell: bash
+        env:
+          # Empty for workflow_dispatch, and all zeros for the first push,
+          # both of which rebuild everything.
+          BASE: ${{ github.event.before }}
+        run: |
+          if [[ -n "$BASE" && "$BASE" != 0000000000000000000000000000000000000000 ]]; then
+            git diff --name-only "$BASE" HEAD -- packages | cut -d/ -f2,3
+          else
+            ls -d packages/*/*/ | sed 's|^packages/||; s|/$||'
+          fi | sort -u | jq -Rsc 'split("\n") | map(select(. != ""))' |
+            sed 's|^|packages=|' >> "$GITHUB_OUTPUT"
+
+  # Each package builds its own source RPM here and hands it to COPR, which
+  # performs the binary builds. Packages are submitted independently.
+  build:
+    needs: changed
+    if: needs.changed.outputs.packages != '[]'
+    runs-on: ubuntu-latest
+    container: registry.fedoraproject.org/fedora:44
+    timeout-minutes: 360
+    environment: copr
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.changed.outputs.packages) }}
+    concurrency:
+      group: copr-${{ matrix.package }}
+      cancel-in-progress: false
+    steps:
+      - name: Prepare the Fedora job container
+        run: dnf -y --setopt=install_weak_deps=False install git-core tar gzip xz copr-cli
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v3
+      - id: config
+        name: Ask the package where and how it builds
+        shell: bash
+        run: go run "packages/${{ matrix.package }}/main.go" config >> "$GITHUB_OUTPUT"
+      - id: srpm
+        uses: ./.github/actions/source-rpm
+        with:
+          package: ${{ matrix.package }}
+      - name: Submit the source RPM to COPR and wait for the build
+        env:
+          COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
+          COPR_OWNER: ${{ vars.COPR_OWNER }}
+          PROJECT: ${{ steps.config.outputs.project }}
+          CHROOTS: ${{ steps.config.outputs.chroots }}
+          NETWORK: ${{ steps.config.outputs.network }}
+          SRPM: ${{ steps.srpm.outputs.srpm }}
+        run: |
+          test -n "$COPR_CONFIG"
+          CONFIG="$RUNNER_TEMP/copr-cli.conf"
+          trap 'rm -f "$CONFIG"' EXIT
+          umask 077
+          printf '%s\n' "$COPR_CONFIG" > "$CONFIG"
+          CHROOT_ARGS=()
+          for CHROOT in $CHROOTS; do CHROOT_ARGS+=(-r "$CHROOT"); done
+          copr-cli --config "$CONFIG" build "$COPR_OWNER/$PROJECT" "$SRPM" \
+            --enable-net "$NETWORK" --timeout 21600 "${CHROOT_ARGS[@]}"
