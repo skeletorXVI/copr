@@ -2,6 +2,9 @@ name: Upstream releases
 on:
   schedule:
     - cron: "17 */6 * * *"
+  # Every change to main rebases the open update branches onto it.
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -71,6 +74,9 @@ jobs:
       - id: check
         name: Ask upstream for its latest release
         shell: bash
+        env:
+          # Read-only and only for the API rate limit; upstreams are public.
+          GH_TOKEN: ${{ github.token }}
         run: go run "packages/${{ matrix.package }}/main.go" check | tee -a "$GITHUB_OUTPUT"
 
       - if: steps.check.outputs.update == 'true'
@@ -78,6 +84,7 @@ jobs:
         # The generator writes a changelog entry for the new version, and
         # authors it with the same identity the commit below is made under.
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
           RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
         run: go run "packages/${{ matrix.package }}/main.go" gen "${{ steps.check.outputs.version }}"
@@ -110,10 +117,12 @@ jobs:
           fi
           git commit -m "$TITLE"
           if git fetch --quiet origin "$PACKAGE" 2>/dev/null; then
-            # An open pull request that already carries this update is left
-            # exactly as it is, rather than rewritten every six hours.
-            if git diff --quiet HEAD FETCH_HEAD -- "packages/$PACKAGE"; then
-              echo "The open pull request already has $VERSION."
+            # An open pull request that already carries this update on top of
+            # the current main is left exactly as it is, rather than rewritten
+            # on every run. One based on an older main is rebuilt on this one.
+            if [[ "$(git rev-parse FETCH_HEAD^)" == "$(git rev-parse HEAD^)" ]] &&
+              git diff --quiet HEAD FETCH_HEAD; then
+              echo "The open pull request already has $VERSION on the current main."
               exit 0
             fi
             # Replacing a pending release with a newer one is the point of

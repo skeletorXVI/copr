@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Definition is everything the core needs to know about a package. Each
@@ -178,7 +179,13 @@ func run(def Definition, args []string, out io.Writer) error {
 				number = built
 			}
 		}
-		log, err := changelog(committed, packaged, version, number)
+		released := func() (time.Time, error) {
+			if dated, ok := def.Releases.(Dated); ok {
+				return dated.Released(ctx, version)
+			}
+			return now(), nil
+		}
+		log, err := changelog(committed, packaged, version, number, released)
 		if err != nil {
 			return err
 		}

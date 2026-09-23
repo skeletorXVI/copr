@@ -452,3 +452,63 @@ func TestChangelogRequiresAnAuthorAddress(t *testing.T) {
 		t.Fatalf("regenerating the packaged version demanded an address: %v", err)
 	}
 }
+
+// dated is an upstream that knows when each version was released.
+type dated map[string]time.Time
+
+func (d dated) LatestRelease(context.Context) (Release, error) { return Release{Version: "1.0.0"}, nil }
+
+func (d dated) Released(_ context.Context, version string) (time.Time, error) {
+	return d[version], nil
+}
+
+// A new version is dated by its upstream release, not by the day it was
+// packaged, so regenerating the same update later writes the same bytes. A
+// packaging rebuild is dated by the clock, and never lets the entries fall
+// out of order.
+func TestChangelogIsDatedByTheRelease(t *testing.T) {
+	day := time.Date(2026, time.September, 22, 0, 0, 0, 0, time.UTC)
+	defer func(original func() time.Time) { now = original }(now)
+	now = func() time.Time { return day }
+	t.Setenv("RELEASE_BOT_NAME", "copr-bot")
+	t.Setenv("RELEASE_BOT_EMAIL", "copr-bot@example.invalid")
+
+	dir := t.TempDir()
+	def := Definition{
+		Project: "example", Name: "example", Policy: ReviewAll{},
+		Chroots: []string{"fedora-44-x86_64"},
+		Releases: dated{
+			"1.0.0": time.Date(2026, time.September, 1, 23, 30, 0, 0, time.UTC),
+			"1.0.1": time.Date(2026, time.September, 10, 8, 0, 0, 0, time.UTC),
+		},
+		Spec: func(Release) Spec {
+			return Spec{
+				Summary: "Example", License: "MIT", URL: "https://example.invalid",
+				Description: []string{"Example."}, Files: []string{"%{_bindir}/example"},
+			}
+		},
+	}
+	newest := func(args ...string) string {
+		t.Helper()
+		if err := run(def, append([]string{"-dir", dir}, args...), io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(filepath.Join(dir, "example.spec"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, log, _ := strings.Cut(string(b), "\n%changelog\n")
+		return strings.SplitN(log, "\n", 2)[0]
+	}
+
+	if got, want := newest("gen", "1.0.0"), "* Tue Sep 01 2026 copr-bot <copr-bot@example.invalid> - 1.0.0-1"; got != want {
+		t.Fatalf("new version: %q, want %q", got, want)
+	}
+	if got, want := newest("-release", "2", "gen", "1.0.0"), "* Tue Sep 22 2026 copr-bot <copr-bot@example.invalid> - 1.0.0-2"; got != want {
+		t.Fatalf("rebuild: %q, want %q", got, want)
+	}
+	// 1.0.1 was released before that rebuild was packaged.
+	if got, want := newest("gen", "1.0.1"), "* Tue Sep 22 2026 copr-bot <copr-bot@example.invalid> - 1.0.1-1"; got != want {
+		t.Fatalf("release older than the newest entry: %q, want %q", got, want)
+	}
+}
