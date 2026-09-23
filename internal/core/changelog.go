@@ -42,13 +42,20 @@ func author() (string, error) {
 	return fmt.Sprintf("%s <%s>", name, email), nil
 }
 
+// entryDate is how a changelog entry spells its date.
+const entryDate = "Mon Jan 02 2006"
+
 // changelog returns the entries for version-release: the committed ones, with
 // a new entry prepended unless the newest already describes this build. So
 // regenerating what is packaged rewrites the same bytes, and only a version or
 // release that actually moved is dated anew. An author is needed only when an
 // entry is actually written, so regenerating what is already packaged requires
 // no identity at all.
-func changelog(committed []string, packaged, version string, release int) ([]string, error) {
+//
+// A new version is dated by when upstream released it, which released looks
+// up only when that entry is written. A new release of the same version is a
+// packaging event, and is dated by the clock.
+func changelog(committed []string, packaged, version string, release int, released func() (time.Time, error)) ([]string, error) {
 	stamp := fmt.Sprintf(" - %s-%d", version, release)
 	if len(committed) > 0 && strings.HasSuffix(committed[0], stamp) {
 		return committed, nil
@@ -58,12 +65,23 @@ func changelog(committed []string, packaged, version string, release int) ([]str
 		return nil, err
 	}
 	// Only the release moved, so nothing about the packaged software changed.
-	what := "Update to " + version
+	what, date := "Update to "+version, now()
 	if len(committed) > 0 && packaged == version {
 		what = "Rebuild for packaging changes"
+	} else if date, err = released(); err != nil {
+		return nil, err
+	}
+	// Entries must stay newest first, so a release published before the last
+	// packaging rebuild is dated no earlier than that rebuild.
+	if len(committed) > 0 {
+		if fields := strings.Fields(committed[0]); len(fields) >= 5 {
+			if newest, err := time.Parse(entryDate, strings.Join(fields[1:5], " ")); err == nil && date.Before(newest) {
+				date = newest
+			}
+		}
 	}
 	entry := []string{
-		fmt.Sprintf("* %s %s%s", now().Format("Mon Jan 02 2006"), who, stamp),
+		fmt.Sprintf("* %s %s%s", date.UTC().Format(entryDate), who, stamp),
 		"- " + what,
 	}
 	if len(committed) == 0 {

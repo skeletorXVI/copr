@@ -6,6 +6,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,9 @@ import (
 const api = "https://api.github.com"
 
 var client = &http.Client{Timeout: 2 * time.Minute}
+
+// errNotFound is a 404, which a lookup by tag takes as "try the next spelling".
+var errNotFound = errors.New("not found")
 
 // get calls the GitHub API, using GH_TOKEN when present purely for rate limits.
 func get(ctx context.Context, path string, dest any) error {
@@ -36,6 +40,10 @@ func get(ctx context.Context, path string, dest any) error {
 		return err
 	}
 	defer resp.Body.Close()
+	// The commits endpoint answers an unknown ref with a 422 rather than a 404.
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusUnprocessableEntity {
+		return fmt.Errorf("GitHub %s: %w", path, errNotFound)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GitHub %s: HTTP %d", path, resp.StatusCode)
 	}
@@ -62,6 +70,17 @@ func (l Latest) LatestRelease(ctx context.Context) (core.Release, error) {
 		return core.Release{}, fmt.Errorf("%s: latest release is not stable", l.Repo)
 	}
 	return build(ctx, release.Tag, l.Vars)
+}
+
+// Released is when the GitHub release of version was published.
+func (l Latest) Released(ctx context.Context, version string) (time.Time, error) {
+	var release struct {
+		Published time.Time `json:"published_at"`
+	}
+	err := byTag(version, func(tag string) error {
+		return get(ctx, "/repos/"+l.Repo+"/releases/tags/"+tag, &release)
+	})
+	return release.Published, err
 }
 
 // HighestTag selects the highest stable version tag. It exists for upstreams
@@ -91,6 +110,32 @@ func (h HighestTag) LatestRelease(ctx context.Context) (core.Release, error) {
 		return core.Release{}, fmt.Errorf("%s has no stable version tags", h.Repo)
 	}
 	return build(ctx, best, h.Vars)
+}
+
+// Released is when the commit tagged version was made, since a bare tag has no
+// publication date of its own.
+func (h HighestTag) Released(ctx context.Context, version string) (time.Time, error) {
+	var commit struct {
+		Commit struct {
+			Committer struct {
+				Date time.Time `json:"date"`
+			} `json:"committer"`
+		} `json:"commit"`
+	}
+	err := byTag(version, func(tag string) error {
+		return get(ctx, "/repos/"+h.Repo+"/commits/"+tag, &commit)
+	})
+	return commit.Commit.Committer.Date, err
+}
+
+// byTag looks a version up under the tag it was released as. Versions drop a
+// leading "v" from their tag, so both spellings are tried.
+func byTag(version string, lookup func(tag string) error) error {
+	err := lookup(version)
+	if errors.Is(err, errNotFound) {
+		err = lookup("v" + version)
+	}
+	return err
 }
 
 func build(ctx context.Context, tag string, vars func(context.Context, string) (map[string]string, error)) (core.Release, error) {

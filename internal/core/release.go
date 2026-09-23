@@ -3,7 +3,10 @@
 // described, and how both are turned into the files COPR builds from.
 package core
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Source is one SourceN entry of a spec file. A source with no URL is a file
 // committed next to the spec; a source with a URL is downloaded and verified
@@ -30,6 +33,15 @@ func (r Release) Var(name string) string { return r.Vars[name] }
 // distribution index, or anything else reachable from the generator.
 type Releases interface {
 	LatestRelease(ctx context.Context) (Release, error)
+}
+
+// Dated is a Releases that also knows when upstream published a version. A
+// new version's changelog entry is dated by it, so the entry describes the
+// release rather than the day it was packaged, and regenerating the same
+// update later writes the same bytes. Releases without it are dated by the
+// clock.
+type Dated interface {
+	Released(ctx context.Context, version string) (time.Time, error)
 }
 
 // ReleasesFunc adapts a plain function to Releases.
