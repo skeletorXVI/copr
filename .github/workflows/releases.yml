@@ -17,30 +17,7 @@ jobs:
     outputs:
       packages: ${{ steps.list.outputs.packages }}
     steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - id: list
-        name: List the package definitions
-        # bash rather than the default shell, so a failure anywhere in these
-        # pipelines fails the step instead of being swallowed.
-        shell: bash
-        run: |
-          ls -d packages/*/*/ | sed 's|^packages/||; s|/$||' |
-            jq -Rsc 'split("\n") | map(select(. != ""))' |
-            sed 's|^|packages=|' >> "$GITHUB_OUTPUT"
-
-  # One job per package: its upstream is asked on its own terms, and an API
-  # failure or an unreadable tag holds back only that package.
-  update:
-    needs: packages
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        package: ${{ fromJSON(needs.packages.outputs.packages) }}
-    steps:
+      # Checked once here, rather than failing every package job alike.
       - name: Require the workflow-triggering bot token
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
@@ -59,9 +36,35 @@ jobs:
           fi
       - uses: actions/checkout@v6
         with:
+          persist-credentials: false
+      - id: list
+        name: List the package definitions
+        # bash rather than the default shell, so a failure anywhere in these
+        # pipelines fails the step instead of being swallowed.
+        shell: bash
+        run: |
+          find packages -mindepth 2 -maxdepth 2 -type d -printf '%P\n' | sort |
+            jq -Rsc 'split("\n") | map(select(. != ""))' |
+            sed 's|^|packages=|' >> "$GITHUB_OUTPUT"
+
+  # One job per package: its upstream is asked on its own terms, and an API
+  # failure or an unreadable tag holds back only that package.
+  update:
+    needs: packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.packages.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
           ref: main
           token: ${{ secrets.GH_PAT }}
       - uses: jdx/mise-action@v3
+        with:
+          install_args: go gh
 
       # The package definition decides what a release is, so a GitHub release,
       # the highest version tag and anything else are all just `check`.

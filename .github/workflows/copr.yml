@@ -31,8 +31,12 @@ jobs:
           if [[ -n "$BASE" && "$BASE" != 0000000000000000000000000000000000000000 ]]; then
             git diff --name-only "$BASE" HEAD -- packages | cut -d/ -f2,3
           else
-            ls -d packages/*/*/ | sed 's|^packages/||; s|/$||'
-          fi | sort -u | jq -Rsc 'split("\n") | map(select(. != ""))' |
+            find packages -mindepth 2 -maxdepth 2 -type d -printf '%P\n'
+          fi | sort -u | while read -r PACKAGE; do
+            # A project README, or a package that was removed, is nothing to
+            # build.
+            if [[ -f "packages/$PACKAGE/main.go" ]]; then echo "$PACKAGE"; fi
+          done | jq -Rsc 'split("\n") | map(select(. != ""))' |
             sed 's|^|packages=|' >> "$GITHUB_OUTPUT"
 
   # Each package builds its own source RPM here and hands it to COPR, which
@@ -58,6 +62,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: jdx/mise-action@v3
+        with:
+          install_args: go
       - id: config
         name: Ask the package where and how it builds
         shell: bash
