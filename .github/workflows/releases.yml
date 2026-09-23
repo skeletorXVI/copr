@@ -37,7 +37,7 @@ jobs:
             echo 'Set the RELEASE_BOT_EMAIL variable to the address the update branches are committed under.' >&2
             exit 1
           fi
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - id: list
@@ -61,7 +61,7 @@ jobs:
       matrix:
         package: ${{ fromJSON(needs.packages.outputs.packages) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: main
           token: ${{ secrets.GH_PAT }}
