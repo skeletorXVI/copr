@@ -10,9 +10,6 @@ inputs:
     default: dist
 
 outputs:
-  name:
-    description: The package name.
-    value: ${{ steps.build.outputs.name }}
   srpm:
     description: Path of the source RPM that was built.
     value: ${{ steps.build.outputs.srpm }}
@@ -48,5 +45,4 @@ runs:
         rm -rf "$DIR/.rpmbuild"
         SRPMS=("$OUTDIR"/*.src.rpm)
         test ${#SRPMS[@]} -eq 1
-        echo "name=$NAME" >> "$GITHUB_OUTPUT"
         echo "srpm=${SRPMS[0]}" >> "$GITHUB_OUTPUT"

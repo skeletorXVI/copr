@@ -11,18 +11,63 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
+  # One job per check, so each passes or fails on its own line in the pull
+  # request.
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: jdx/mise-action@v3
+        with:
+          install_args: go
       - run: go test ./...
+
+  vet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v3
+        with:
+          install_args: go
       - run: go vet ./...
+
+  gofmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v3
+        with:
+          install_args: go
       - name: Check Go formatting
         run: test -z "$(gofmt -l internal packages)"
+
+  oxfmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v3
+        with:
+          install_args: oxfmt
       - run: oxfmt --check .
+
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v3
+        with:
+          # actionlint runs shellcheck over every run: script when it is found.
+          install_args: actionlint shellcheck
       - run: actionlint
 
   # Only what the pull request touches is validated, and every package says
@@ -32,13 +77,14 @@ jobs:
     outputs:
       packages: ${{ steps.plan.outputs.packages }}
       targets: ${{ steps.plan.outputs.targets }}
-      rebuilds: ${{ steps.plan.outputs.rebuilds }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
       - uses: jdx/mise-action@v3
+        with:
+          install_args: go
       - id: plan
         name: Ask the changed packages where they build
         # bash rather than the default shell, so a failure anywhere in these
@@ -49,25 +95,25 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           if [[ -n "$BASE" ]]; then
-            mapfile -t PACKAGES < <(git diff --name-only "$BASE" HEAD -- packages | cut -d/ -f2,3 | sort -u)
+            mapfile -t CHANGED < <(git diff --name-only "$BASE" HEAD -- packages | cut -d/ -f2,3 | sort -u)
           else
-            mapfile -t PACKAGES < <(ls -d packages/*/*/ | sed 's|^packages/||; s|/$||')
+            mapfile -t CHANGED < <(find packages -mindepth 2 -maxdepth 2 -type d -printf '%P\n' | sort)
           fi
-          ROWS=()
-          for PACKAGE in ${PACKAGES[@]+"${PACKAGES[@]}"}; do
-            CONFIG=$(go run "packages/$PACKAGE/main.go" config)
-            REBUILD=$(sed -n 's/^rebuild=//p' <<<"$CONFIG")
-            for RELEASE in $(sed -n 's/^releases=//p' <<<"$CONFIG"); do
-              ROWS+=("$PACKAGE $RELEASE $REBUILD")
-            done
+          TARGETS=
+          for PACKAGE in "${CHANGED[@]}"; do
+            # A project README, or a package that was removed, is nothing to
+            # build.
+            [[ -f "packages/$PACKAGE/main.go" ]] || continue
+            # One target per Fedora release, carrying the rest of the config.
+            TARGETS+=$(go run "packages/$PACKAGE/main.go" config | jq -Rnc --arg package "$PACKAGE" '
+              [inputs | capture("^(?<key>[^=]*)=(?<value>.*)$")] | from_entries |
+              {package: $package, rebuild: (.rebuild == "true"), verify} +
+                (.releases | split(" ")[] | {fedora: .})')
           done
-          PLAN=$(printf '%s\n' ${ROWS[@]+"${ROWS[@]}"} | jq -Rsc '
-            split("\n") | map(select(. != "")) |
-            map(split(" ") | {package: .[0], fedora: .[1], rebuild: .[2]})')
+          PLAN=$(jq -sc . <<<"$TARGETS")
           {
             echo "packages=$(jq -c 'map(.package) | unique' <<<"$PLAN")"
-            echo "targets=$(jq -c 'map({package, fedora})' <<<"$PLAN")"
-            echo "rebuilds=$(jq -c 'map(select(.rebuild == "true") | {package, fedora})' <<<"$PLAN")"
+            echo "targets=$PLAN"
           } | tee -a "$GITHUB_OUTPUT"
 
   # A generated spec must be exactly what its definition produces, so a hand
@@ -86,6 +132,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: jdx/mise-action@v3
+        with:
+          install_args: go
       - name: Regenerate the spec file at its packaged version
         run: go run "packages/${{ matrix.package }}/main.go" gen
       - name: Check the committed spec matches its definition
@@ -93,7 +141,7 @@ jobs:
 
   # One job per package and Fedora release it targets. The build target is the
   # job environment itself; no nested containers.
-  srpm:
+  build:
     needs: plan
     if: needs.plan.outputs.targets != '[]'
     runs-on: ubuntu-latest
@@ -113,51 +161,24 @@ jobs:
         uses: ./.github/actions/source-rpm
         with:
           package: ${{ matrix.package }}
-      - uses: actions/upload-artifact@v6
-        with:
-          name: srpm-${{ steps.srpm.outputs.name }}-fedora-${{ matrix.fedora }}
-          path: dist/*.src.rpm
-          if-no-files-found: error
 
-  # Only packages that ask for it, because a full rebuild is affordable for
-  # repackaged binaries and prohibitive for a large source build.
-  rebuild:
-    needs: plan
-    if: needs.plan.outputs.rebuilds != '[]'
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.plan.outputs.rebuilds) }}
-    container: registry.fedoraproject.org/fedora:${{ matrix.fedora }}
-    steps:
-      - name: Prepare the Fedora job container
-        run: dnf -y --setopt=install_weak_deps=False install git-core tar gzip xz
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - uses: jdx/mise-action@v3
-      - id: srpm
-        uses: ./.github/actions/source-rpm
-        with:
-          package: ${{ matrix.package }}
-      - id: config
-        shell: bash
-        run: go run "packages/${{ matrix.package }}/main.go" config >> "$GITHUB_OUTPUT"
-      - name: Rebuild the binary RPM and run what it installs
+      # Only packages that ask for it are rebuilt, because a full rebuild is
+      # affordable for repackaged binaries and prohibitive for a large source
+      # build.
+      - if: matrix.rebuild
+        name: Rebuild the binary RPM
         env:
           SRPM: ${{ steps.srpm.outputs.srpm }}
-          VERIFY: ${{ steps.config.outputs.verify }}
         run: |
           dnf -y --setopt=install_weak_deps=False install dnf-plugins-core desktop-file-utils
           dnf -y --setopt=install_weak_deps=False builddep "$SRPM"
           rpmbuild --rebuild --define "_topdir $PWD/dist" "$SRPM"
-          dnf -y --setopt=install_weak_deps=False install dist/RPMS/*/*.rpm
-          # The package says how to prove its installation works.
-          $VERIFY
-      - uses: actions/upload-artifact@v6
-        with:
-          name: rpm-${{ steps.srpm.outputs.name }}-fedora-${{ matrix.fedora }}
-          path: dist/RPMS/**/*.rpm
-          if-no-files-found: error
+      - if: matrix.rebuild
+        name: Install the binary RPM
+        run: dnf -y --setopt=install_weak_deps=False install dist/RPMS/*/*.rpm
+      # The package says how to prove its installation works.
+      - if: matrix.rebuild && matrix.verify != ''
+        name: Run what the binary RPM installs
+        env:
+          VERIFY: ${{ matrix.verify }}
+        run: $VERIFY
