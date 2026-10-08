@@ -1,10 +1,10 @@
 Name:           libre-graph-api-cpp-qt-client
-Version:        1.0.7
+Version:        1.0.8
 Release:        1%{?dist}
 Summary:        Qt client for the Libre Graph API
 License:        Apache-2.0
 URL:            https://github.com/opencloud-eu/libre-graph-api-cpp-qt-client
-Source0:        https://github.com/opencloud-eu/libre-graph-api-cpp-qt-client/archive/refs/tags/v1.0.7.tar.gz#/libre-graph-api-cpp-qt-client-1.0.7.tar.gz
+Source0:        https://github.com/opencloud-eu/libre-graph-api-cpp-qt-client/archive/refs/tags/v1.0.8.tar.gz#/libre-graph-api-cpp-qt-client-1.0.8.tar.gz
 BuildRequires:  cmake
 BuildRequires:  gcc-c++
 BuildRequires:  qt6-qtbase-devel
@@ -41,5 +41,8 @@ Headers and CMake metadata for the Libre Graph Qt client.
 %{_libdir}/cmake/LibreGraphAPI/
 
 %changelog
+* Thu Oct 01 2026 copr-bot <copr-bot@fabian-haenel.dev> - 1.0.8-1
+- Update to 1.0.8
+
 * Tue Sep 22 2026 copr-bot <copr-bot@fabian-haenel.dev> - 1.0.7-1
 - Update to 1.0.7
