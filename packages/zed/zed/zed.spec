@@ -1,12 +1,12 @@
 %global debug_package %{nil}
 
 Name:           zed
-Version:        1.21.0
+Version:        1.23.2
 Release:        1%{?dist}
 Summary:        High-performance collaborative code editor
 License:        GPL-3.0-or-later AND Apache-2.0 AND AGPL-3.0-or-later
 URL:            https://zed.dev
-Source0:        https://github.com/zed-industries/zed/archive/refs/tags/v1.21.0.tar.gz#/zed-1.21.0.tar.gz
+Source0:        https://github.com/zed-industries/zed/archive/refs/tags/v1.23.2.tar.gz#/zed-1.23.2.tar.gz
 ExclusiveArch:  x86_64
 BuildRequires:  cargo
 BuildRequires:  rust >= 1.98.1
@@ -91,6 +91,9 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/dev.zed.Zed.desktop
 %{_datadir}/icons/hicolor/*/apps/zed.png
 
 %changelog
+* Wed Oct 07 2026 copr-bot <copr-bot@fabian-haenel.dev> - 1.23.2-1
+- Update to 1.23.2
+
 * Wed Sep 23 2026 copr-bot <copr-bot@fabian-haenel.dev> - 1.21.0-1
 - Update to 1.21.0
 
