@@ -7,12 +7,12 @@
 %global __requires_exclude ^lib(moz[^.]*|gkcodecs|lgpllibs|xul|onnxruntime)\\.so.*$
 
 Name:           zen-browser
-Version:        1.23b
+Version:        1.23.2b
 Release:        1%{?dist}
 Summary:        Privacy-focused web browser based on Firefox
 License:        MPL-2.0
 URL:            https://zen-browser.app
-Source0:        https://github.com/zen-browser/desktop/releases/download/1.23b/zen.linux-x86_64.tar.xz
+Source0:        https://github.com/zen-browser/desktop/releases/download/1.23.2b/zen.linux-x86_64.tar.xz
 Source1:        zen-browser.desktop
 Source2:        policies.json
 ExclusiveArch:  x86_64
@@ -67,6 +67,9 @@ test -x %{buildroot}%{_libdir}/%{name}/zen
 %{_datadir}/icons/hicolor/*/apps/%{name}.png
 
 %changelog
+* Fri Oct 09 2026 copr-bot <copr-bot@fabian-haenel.dev> - 1.23.2b-1
+- Update to 1.23.2b
+
 * Sat Oct 03 2026 copr-bot <copr-bot@fabian-haenel.dev> - 1.23b-1
 - Update to 1.23b
 
